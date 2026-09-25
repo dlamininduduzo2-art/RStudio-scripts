@@ -1,30 +1,32 @@
-# ============================================================================== 
+# ==============================================================================
 # SILVA 144 TAXONOMIC COMPOSITION + CO-OCCURRENCE NETWORK ANALYSIS
-# Potato rhizosphere bacterial community
+# Potato rhizosphere bacterial microbiome
 #
-# Inputs:
+# INPUTS:
 #   R_taxonomy_plots/feature-table.tsv
 #   R_taxonomy_plots/taxonomy144/taxonomy.tsv
 #
-# Outputs:
+# OUTPUTS:
 #   R_taxonomy_plots/final_outputs/
 #
-# Main outputs:
+# Produces:
 #   1. Phylum relative-abundance plot
 #   2. Genus relative-abundance plot
 #   3. Top-20 genus heatmap
-#   4. Genus-level igraph co-occurrence network
-#   5. Hub-taxa plot
-#   6. Network node and edge tables
-#   7. GraphML network for Cytoscape/Gephi
+#   4. Genus-level co-occurrence network
+#   5. Hub-taxa network
+#   6. Hub degree plot
+#   7. Network statistics
+#   8. Node/edge CSV files
+#   9. GraphML file for Cytoscape / Gephi
 #
-# NOTE:
-#   Co-occurrence/association does NOT demonstrate direct ecological interaction.
+# IMPORTANT:
+# Co-occurrence associations do not prove direct ecological interactions.
 # ==============================================================================
 
 
 # ==============================================================================
-# 0. USER SETTINGS
+# 1. USER SETTINGS
 # ==============================================================================
 
 FEATURE_FILE <- "R_taxonomy_plots/feature-table.tsv"
@@ -34,48 +36,29 @@ TAXONOMY_FILE <- "R_taxonomy_plots/taxonomy144/taxonomy.tsv"
 OUTPUT_DIR <- "R_taxonomy_plots/final_outputs"
 
 
-# Number of taxa displayed in figures
-TOP_PHYLA  <- 10
+# Number of taxa displayed
+TOP_PHYLA <- 10
 TOP_GENERA <- 15
 TOP_HEATMAP_GENERA <- 20
 
 
-# Network settings
+# Network parameters
 PREVALENCE_THRESHOLD <- 0.20
-
 CORRELATION_THRESHOLD <- 0.60
-
 FDR_THRESHOLD <- 0.05
-
 PSEUDOCOUNT <- 0.5
 
 
-# TRUE = remove chloroplast, mitochondria and non-bacterial features
+# Remove chloroplast, mitochondria and non-bacterial sequences
 REMOVE_NON_TARGET <- TRUE
 
 
-# For a genuine genus-level network, unresolved family-level taxa
-# will NOT be treated as genera.
-NETWORK_INCLUDE_UNCLASSIFIED <- FALSE
-
-
-# Optional manual sample order.
-# Leave NULL to preserve the order in the QIIME feature table.
+# Preserve feature-table sample order by default
 CUSTOM_SAMPLE_ORDER <- NULL
-
-# Example:
-#
-# CUSTOM_SAMPLE_ORDER <- c(
-#   "ND-CLB1",
-#   "ND-CLR1",
-#   "ND-CLR2",
-#   "ND-CL-R3",
-#   "ND-CL-R4"
-# )
 
 
 # ==============================================================================
-# 1. PACKAGES
+# 2. PACKAGES
 # ==============================================================================
 
 required_packages <- c(
@@ -90,7 +73,10 @@ missing_packages <- required_packages[
 ]
 
 if (length(missing_packages) > 0) {
-  install.packages(missing_packages)
+
+  install.packages(
+    missing_packages
+  )
 }
 
 library(tidyverse)
@@ -100,7 +86,7 @@ library(viridisLite)
 
 
 # ==============================================================================
-# 2. OUTPUT DIRECTORY
+# 3. CREATE OUTPUT DIRECTORY
 # ==============================================================================
 
 dir.create(
@@ -111,7 +97,7 @@ dir.create(
 
 
 # ==============================================================================
-# 3. IMPORT FEATURE TABLE
+# 4. IMPORT FEATURE TABLE
 # ==============================================================================
 
 asv <- read.delim(
@@ -125,53 +111,53 @@ asv <- read.delim(
 colnames(asv)[1] <- "FeatureID"
 
 
+all_samples <- colnames(asv)[-1]
+
+
+if (is.null(CUSTOM_SAMPLE_ORDER)) {
+
+  sample_order <- all_samples
+
+} else {
+
+  sample_order <- CUSTOM_SAMPLE_ORDER
+
+  missing_samples <- setdiff(
+    all_samples,
+    sample_order
+  )
+
+  if (length(missing_samples) > 0) {
+
+    sample_order <- c(
+      sample_order,
+      missing_samples
+    )
+  }
+}
+
+
 cat("\n========================================\n")
 cat("FEATURE TABLE\n")
 cat("========================================\n")
 
-cat("Number of ASVs:", nrow(asv), "\n")
-cat("Number of samples:", ncol(asv) - 1, "\n")
+cat(
+  "ASVs:",
+  nrow(asv),
+  "\n"
+)
 
+cat(
+  "Samples:",
+  length(all_samples),
+  "\n\n"
+)
 
-# Preserve sample order exactly as it appears in the feature table
-
-all_samples <- colnames(asv)[-1]
-
-
-if (!is.null(CUSTOM_SAMPLE_ORDER)) {
-
-  missing_from_order <- setdiff(
-    all_samples,
-    CUSTOM_SAMPLE_ORDER
-  )
-
-  if (length(missing_from_order) > 0) {
-
-    warning(
-      "Some samples were missing from CUSTOM_SAMPLE_ORDER: ",
-      paste(missing_from_order, collapse = ", ")
-    )
-
-    CUSTOM_SAMPLE_ORDER <- c(
-      CUSTOM_SAMPLE_ORDER,
-      missing_from_order
-    )
-  }
-
-  sample_order <- CUSTOM_SAMPLE_ORDER
-
-} else {
-
-  sample_order <- all_samples
-}
-
-
-cat("\nSample order:\n")
 print(sample_order)
 
 
 # ==============================================================================
-# 4. IMPORT SILVA 144 TAXONOMY
+# 5. IMPORT SILVA 144 TAXONOMY
 # ==============================================================================
 
 tax <- read.delim(
@@ -187,42 +173,36 @@ colnames(tax)[1] <- "FeatureID"
 if (!"Taxon" %in% colnames(tax)) {
 
   stop(
-    paste0(
-      "A column named 'Taxon' was not found.\n",
-      "Available columns: ",
-      paste(colnames(tax), collapse = ", ")
+    paste(
+      "No column named 'Taxon' found.",
+      "Available columns:",
+      paste(
+        colnames(tax),
+        collapse = ", "
+      )
     )
   )
 }
 
 
-cat("\n========================================\n")
-cat("TAXONOMY TABLE\n")
-cat("========================================\n")
-
-cat("Taxonomic assignments:", nrow(tax), "\n")
-
-
 # ==============================================================================
-# 5. ROBUST SILVA TAXONOMY PARSING
+# 6. SILVA TAXONOMY PARSER
 #
-# This handles BOTH:
+# Handles both:
 #
-# SILVA style:
-#   d__Bacteria
-#   p__Pseudomonadota
-#   c__Gammaproteobacteria
+# d__Bacteria; p__Pseudomonadota...
 #
-# and older style:
-#   D_0__Bacteria
-#   D_1__Proteobacteria
+# AND
 #
-# This is safer than assuming each semicolon-separated field occupies
-# a particular position.
+# D_0__Bacteria; D_1__Proteobacteria...
+#
 # ==============================================================================
 
-
-extract_tax_rank <- function(x, modern_prefix, old_rank) {
+extract_rank <- function(
+    x,
+    modern_prefix,
+    old_rank
+) {
 
   modern_pattern <- paste0(
     "(?:^|;\\s*)",
@@ -236,15 +216,18 @@ extract_tax_rank <- function(x, modern_prefix, old_rank) {
     "__([^;]+)"
   )
 
+
   modern <- str_match(
     x,
     modern_pattern
   )[, 2]
 
+
   old <- str_match(
     x,
     old_pattern
   )[, 2]
+
 
   result <- ifelse(
     !is.na(modern),
@@ -252,15 +235,19 @@ extract_tax_rank <- function(x, modern_prefix, old_rank) {
     old
   )
 
-  result <- str_trim(result)
+
+  result <- str_trim(
+    result
+  )
+
 
   result[
     result == "" |
-      result == "uncultured" |
       result == "Unassigned"
   ] <- NA
 
-  result
+
+  return(result)
 }
 
 
@@ -272,43 +259,43 @@ tax_clean <- tax %>%
 
     FullTaxonomy = Taxon,
 
-    Domain = extract_tax_rank(
+    Domain = extract_rank(
       Taxon,
       "(?:d|k)",
       0
     ),
 
-    Phylum = extract_tax_rank(
+    Phylum = extract_rank(
       Taxon,
       "p",
       1
     ),
 
-    Class = extract_tax_rank(
+    Class = extract_rank(
       Taxon,
       "c",
       2
     ),
 
-    Order = extract_tax_rank(
+    Order = extract_rank(
       Taxon,
       "o",
       3
     ),
 
-    Family = extract_tax_rank(
+    Family = extract_rank(
       Taxon,
       "f",
       4
     ),
 
-    Genus = extract_tax_rank(
+    Genus = extract_rank(
       Taxon,
       "g",
       5
     ),
 
-    Species = extract_tax_rank(
+    Species = extract_rank(
       Taxon,
       "s",
       6
@@ -317,28 +304,39 @@ tax_clean <- tax %>%
 
 
 # ==============================================================================
-# 6. TAXONOMY QC
+# 7. TAXONOMY RESOLUTION SUMMARY
 # ==============================================================================
 
 taxonomy_resolution <- tax_clean %>%
+
   summarise(
 
     Total_ASVs = n(),
 
-    Domain_resolved = sum(!is.na(Domain)),
+    Domain_resolved =
+      sum(!is.na(Domain)),
 
-    Phylum_resolved = sum(!is.na(Phylum)),
+    Phylum_resolved =
+      sum(!is.na(Phylum)),
 
-    Family_resolved = sum(!is.na(Family)),
+    Family_resolved =
+      sum(!is.na(Family)),
 
-    Genus_resolved = sum(!is.na(Genus)),
+    Genus_resolved =
+      sum(!is.na(Genus)),
 
-    Species_resolved = sum(!is.na(Species))
+    Species_resolved =
+      sum(!is.na(Species))
   )
 
 
-cat("\nTaxonomic resolution:\n")
-print(taxonomy_resolution)
+cat("\n========================================\n")
+cat("TAXONOMIC RESOLUTION\n")
+cat("========================================\n")
+
+print(
+  taxonomy_resolution
+)
 
 
 write.csv(
@@ -351,8 +349,18 @@ write.csv(
 )
 
 
+write.csv(
+  tax_clean,
+  file.path(
+    OUTPUT_DIR,
+    "SILVA144_cleaned_taxonomy.csv"
+  ),
+  row.names = FALSE
+)
+
+
 # ==============================================================================
-# 7. CONVERT FEATURE TABLE TO LONG FORMAT
+# 8. CONVERT FEATURE TABLE TO LONG FORMAT
 # ==============================================================================
 
 asv_long <- asv %>%
@@ -370,15 +378,12 @@ asv_long <- asv %>%
 
     Count = as.numeric(Count),
 
-    Sample = factor(
-      Sample,
-      levels = sample_order
-    )
+    Sample = as.character(Sample)
   )
 
 
 # ==============================================================================
-# 8. JOIN COUNTS TO TAXONOMY
+# 9. JOIN TAXONOMY TO COUNTS
 # ==============================================================================
 
 dat <- asv_long %>%
@@ -390,7 +395,7 @@ dat <- asv_long %>%
 
 
 # ==============================================================================
-# 9. OPTIONAL NON-TARGET FILTERING
+# 10. REMOVE NON-TARGET FEATURES
 # ==============================================================================
 
 if (REMOVE_NON_TARGET) {
@@ -399,22 +404,20 @@ if (REMOVE_NON_TARGET) {
 
     filter(
 
-      is.na(FullTaxonomy) |
-
-        !str_detect(
+      !str_detect(
+        coalesce(
           FullTaxonomy,
-          regex(
-            "chloroplast|mitochondria",
-            ignore_case = TRUE
-          )
+          ""
+        ),
+        regex(
+          "chloroplast|mitochondria",
+          ignore_case = TRUE
         )
-    )
-
-  # If domain is assigned, retain bacteria only
-
-  dat <- dat %>%
+      )
+    ) %>%
 
     filter(
+
       is.na(Domain) |
         Domain == "Bacteria"
     )
@@ -422,31 +425,7 @@ if (REMOVE_NON_TARGET) {
 
 
 # ==============================================================================
-# 10. CLEAN TAXONOMIC LABELS
-# ==============================================================================
-
-dat <- dat %>%
-
-  mutate(
-
-    Phylum_plot = case_when(
-
-      is.na(Phylum) ~ "Unclassified",
-
-      TRUE ~ Phylum
-    ),
-
-    Genus_plot_raw = case_when(
-
-      !is.na(Genus) ~ Genus,
-
-      TRUE ~ "Unclassified"
-    )
-  )
-
-
-# ==============================================================================
-# 11. SAMPLE COUNT QC
+# 11. SAMPLE READ TOTALS
 # ==============================================================================
 
 sample_counts <- dat %>%
@@ -455,12 +434,31 @@ sample_counts <- dat %>%
 
   summarise(
 
-    Total_reads = sum(
-      Count,
-      na.rm = TRUE
-    ),
+    Total_reads =
+      sum(
+        Count,
+        na.rm = TRUE
+      ),
 
     .groups = "drop"
+  )
+
+
+sample_counts <- tibble(
+  Sample = sample_order
+) %>%
+
+  left_join(
+    sample_counts,
+    by = "Sample"
+  ) %>%
+
+  mutate(
+    Total_reads =
+      replace_na(
+        Total_reads,
+        0
+      )
   )
 
 
@@ -485,167 +483,299 @@ write.csv(
 
 
 # ==============================================================================
-# 12. PHYLUM-LEVEL RELATIVE ABUNDANCE
+# 12. FUNCTION: CALCULATE RELATIVE ABUNDANCE
 # ==============================================================================
 
-phylum <- dat %>%
+make_rank_abundance <- function(
+    data,
+    rank_name
+) {
 
-  group_by(
-    Sample,
-    Phylum = Phylum_plot
-  ) %>%
+  result <- data %>%
 
-  summarise(
+    mutate(
 
-    Count = sum(
-      Count,
-      na.rm = TRUE
+      Taxon = coalesce(
+        .data[[rank_name]],
+        "Unclassified"
+      )
+    ) %>%
+
+    group_by(
+      Sample,
+      Taxon
+    ) %>%
+
+    summarise(
+
+      Count =
+        sum(
+          Count,
+          na.rm = TRUE
+        ),
+
+      .groups = "drop"
+    ) %>%
+
+    group_by(Sample) %>%
+
+    mutate(
+
+      Sample_total =
+        sum(
+          Count,
+          na.rm = TRUE
+        ),
+
+      Relative_abundance =
+        ifelse(
+          Sample_total > 0,
+          Count /
+            Sample_total *
+            100,
+          0
+        )
+    ) %>%
+
+    ungroup() %>%
+
+    select(
+      -Sample_total
+    )
+
+
+  return(result)
+}
+
+
+# ==============================================================================
+# 13. FUNCTION: COLLAPSE TO TOP TAXA + OTHER
+# ==============================================================================
+
+collapse_top_taxa <- function(
+    abundance_data,
+    n_top
+) {
+
+  rank_summary <- abundance_data %>%
+
+    group_by(Taxon) %>%
+
+    summarise(
+
+      Mean_abundance =
+        mean(
+          Relative_abundance,
+          na.rm = TRUE
+        ),
+
+      .groups = "drop"
+    ) %>%
+
+    arrange(
+      desc(Mean_abundance)
+    )
+
+
+  n_keep <- min(
+    n_top,
+    nrow(rank_summary)
+  )
+
+
+  top_taxa <- rank_summary %>%
+
+    slice_head(
+      n = n_keep
+    ) %>%
+
+    pull(Taxon)
+
+
+  collapsed <- abundance_data %>%
+
+    mutate(
+
+      Taxon_plot =
+        if_else(
+          Taxon %in% top_taxa,
+          Taxon,
+          "Other"
+        )
+    ) %>%
+
+    group_by(
+      Sample,
+      Taxon_plot
+    ) %>%
+
+    summarise(
+
+      Relative_abundance =
+        sum(
+          Relative_abundance,
+          na.rm = TRUE
+        ),
+
+      .groups = "drop"
+    )
+
+
+  categories <- c(
+    top_taxa,
+    if ("Other" %in% collapsed$Taxon_plot)
+      "Other"
+  )
+
+
+  categories <- unique(
+    categories
+  )
+
+
+  full_grid <- expand_grid(
+
+    Sample =
+      sample_order,
+
+    Taxon_plot =
+      categories
+  )
+
+
+  collapsed <- full_grid %>%
+
+    left_join(
+
+      collapsed,
+
+      by = c(
+        "Sample",
+        "Taxon_plot"
+      )
+    ) %>%
+
+    mutate(
+
+      Relative_abundance =
+        replace_na(
+          Relative_abundance,
+          0
+        )
+    ) %>%
+
+    group_by(Sample) %>%
+
+    mutate(
+
+      Plot_total =
+        sum(
+          Relative_abundance,
+          na.rm = TRUE
+        ),
+
+      Relative_abundance =
+        ifelse(
+          Plot_total > 0,
+          Relative_abundance /
+            Plot_total *
+            100,
+          0
+        )
+    ) %>%
+
+    ungroup() %>%
+
+    select(
+      -Plot_total
+    ) %>%
+
+    mutate(
+
+      Sample = factor(
+        Sample,
+        levels = sample_order
+      ),
+
+      Taxon_plot = factor(
+        Taxon_plot,
+        levels = categories
+      )
+    )
+
+
+  return(
+    list(
+      data = collapsed,
+      top_taxa = top_taxa,
+      categories = categories
+    )
+  )
+}
+
+
+# ==============================================================================
+# 14. FUNCTION: CREATE COLOURS
+# ==============================================================================
+
+make_taxon_colours <- function(
+    categories
+) {
+
+  main_taxa <- setdiff(
+    categories,
+    "Other"
+  )
+
+
+  colours <- setNames(
+
+    hcl.colors(
+      length(main_taxa),
+      palette = "Dark 3"
     ),
 
-    .groups = "drop"
-  ) %>%
-
-  group_by(Sample) %>%
-
-  mutate(
-
-    Relative_abundance =
-      Count /
-      sum(Count) *
-      100
-  ) %>%
-
-  ungroup()
-
-
-# Top phyla
-
-top_phyla <- phylum %>%
-
-  group_by(Phylum) %>%
-
-  summarise(
-
-    Mean_abundance =
-      mean(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    .groups = "drop"
-  ) %>%
-
-  arrange(
-    desc(Mean_abundance)
-  ) %>%
-
-  slice_head(
-    n = TOP_PHYLA
-  ) %>%
-
-  pull(Phylum)
-
-
-phylum_collapsed <- phylum %>%
-
-  mutate(
-
-    Phylum_plot = if_else(
-
-      Phylum %in% top_phyla,
-
-      Phylum,
-
-      "Other"
-    )
-  ) %>%
-
-  group_by(
-    Sample,
-    Phylum_plot
-  ) %>%
-
-  summarise(
-
-    Relative_abundance =
-      sum(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    .groups = "drop"
+    main_taxa
   )
 
 
-# ==============================================================================
-# 13. GUARANTEE EVERY SAMPLE EXISTS IN PHYLUM PLOT
-# ==============================================================================
+  if ("Other" %in% categories) {
 
-all_phylum_categories <- unique(
-  phylum_collapsed$Phylum_plot
-)
-
-
-phylum_grid <- expand_grid(
-
-  Sample = factor(
-    sample_order,
-    levels = sample_order
-  ),
-
-  Phylum_plot = all_phylum_categories
-)
-
-
-phylum_plot_data <- phylum_grid %>%
-
-  left_join(
-    phylum_collapsed,
-    by = c(
-      "Sample",
-      "Phylum_plot"
+    colours <- c(
+      colours,
+      "Other" = "grey82"
     )
-  ) %>%
+  }
 
-  mutate(
 
-    Relative_abundance =
-      replace_na(
-        Relative_abundance,
-        0
-      )
-  ) %>%
-
-  group_by(Sample) %>%
-
-  mutate(
-
-    sample_total =
-      sum(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    Relative_abundance =
-      if_else(
-        sample_total > 0,
-        Relative_abundance /
-          sample_total *
-          100,
-        0
-      )
-  ) %>%
-
-  ungroup() %>%
-
-  select(
-    -sample_total
-  )
+  return(colours)
+}
 
 
 # ==============================================================================
-# 14. PHYLUM SAMPLE COMPLETENESS CHECK
+# 15. PHYLUM RELATIVE ABUNDANCE
 # ==============================================================================
+
+phylum <- make_rank_abundance(
+  dat,
+  "Phylum"
+)
+
+
+phylum_result <- collapse_top_taxa(
+  phylum,
+  TOP_PHYLA
+)
+
+
+phylum_plot_data <-
+  phylum_result$data
+
+
+phylum_colours <- make_taxon_colours(
+  phylum_result$categories
+)
+
 
 phylum_totals <- phylum_plot_data %>%
 
@@ -663,47 +793,14 @@ phylum_totals <- phylum_plot_data %>%
   )
 
 
-cat("\nPhylum relative abundance totals:\n")
+cat("\n========================================\n")
+cat("PHYLUM PLOT TOTALS\n")
+cat("========================================\n")
 
 print(
   phylum_totals,
   n = Inf
 )
-
-
-# ==============================================================================
-# 15. PHYLUM COLOURS
-# ==============================================================================
-
-phylum_levels <- unique(
-  phylum_plot_data$Phylum_plot
-)
-
-
-main_phyla <- setdiff(
-  phylum_levels,
-  "Other"
-)
-
-
-phylum_colours <- setNames(
-
-  hcl.colors(
-    length(main_phyla),
-    palette = "Dark 3"
-  ),
-
-  main_phyla
-)
-
-
-if ("Other" %in% phylum_levels) {
-
-  phylum_colours <- c(
-    phylum_colours,
-    "Other" = "grey80"
-  )
-}
 
 
 # ==============================================================================
@@ -720,7 +817,7 @@ p_phylum <- ggplot(
 
     y = Relative_abundance,
 
-    fill = Phylum_plot
+    fill = Taxon_plot
   )
 
 ) +
@@ -735,16 +832,18 @@ p_phylum <- ggplot(
 
   scale_y_continuous(
 
-    breaks = seq(
-      0,
-      100,
-      20
-    ),
+    breaks =
+      seq(
+        0,
+        100,
+        20
+      ),
 
-    expand = c(
-      0,
-      0
-    )
+    expand =
+      c(
+        0,
+        0
+      )
   ) +
 
   coord_cartesian(
@@ -773,30 +872,31 @@ p_phylum <- ggplot(
 
   theme(
 
-    axis.text.x = element_text(
+    axis.text.x =
+      element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        colour = "black"
+      ),
 
-      angle = 45,
+    axis.text.y =
+      element_text(
+        colour = "black"
+      ),
 
-      hjust = 1,
+    axis.title.y =
+      element_text(
+        face = "bold"
+      ),
 
-      vjust = 1,
+    legend.title =
+      element_text(
+        face = "bold"
+      ),
 
-      colour = "black"
-    ),
-
-    axis.text.y = element_text(
-      colour = "black"
-    ),
-
-    axis.title.y = element_text(
-      face = "bold"
-    ),
-
-    legend.title = element_text(
-      face = "bold"
-    ),
-
-    legend.position = "right"
+    legend.position =
+      "right"
   )
 
 
@@ -839,172 +939,26 @@ ggsave(
 # 17. GENUS RELATIVE ABUNDANCE
 # ==============================================================================
 
-genus <- dat %>%
-
-  group_by(
-
-    Sample,
-
-    Genus = Genus_plot_raw
-  ) %>%
-
-  summarise(
-
-    Count =
-      sum(
-        Count,
-        na.rm = TRUE
-      ),
-
-    .groups = "drop"
-  ) %>%
-
-  group_by(Sample) %>%
-
-  mutate(
-
-    Relative_abundance =
-      Count /
-      sum(Count) *
-      100
-  ) %>%
-
-  ungroup()
-
-
-# ==============================================================================
-# 18. TOP GENERA
-# ==============================================================================
-
-top_genera <- genus %>%
-
-  group_by(Genus) %>%
-
-  summarise(
-
-    Mean_abundance =
-      mean(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    .groups = "drop"
-  ) %>%
-
-  arrange(
-    desc(Mean_abundance)
-  ) %>%
-
-  slice_head(
-    n = TOP_GENERA
-  ) %>%
-
-  pull(Genus)
-
-
-genus_collapsed <- genus %>%
-
-  mutate(
-
-    Genus_plot = if_else(
-
-      Genus %in% top_genera,
-
-      Genus,
-
-      "Other"
-    )
-  ) %>%
-
-  group_by(
-    Sample,
-    Genus_plot
-  ) %>%
-
-  summarise(
-
-    Relative_abundance =
-      sum(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    .groups = "drop"
-  )
-
-
-# ==============================================================================
-# 19. GUARANTEE EVERY SAMPLE EXISTS IN GENUS PLOT
-# ==============================================================================
-
-all_genus_categories <- unique(
-  genus_collapsed$Genus_plot
+genus <- make_rank_abundance(
+  dat,
+  "Genus"
 )
 
 
-genus_grid <- expand_grid(
-
-  Sample = factor(
-    sample_order,
-    levels = sample_order
-  ),
-
-  Genus_plot =
-    all_genus_categories
+genus_result <- collapse_top_taxa(
+  genus,
+  TOP_GENERA
 )
 
 
-genus_plot_data <- genus_grid %>%
-
-  left_join(
-
-    genus_collapsed,
-
-    by = c(
-      "Sample",
-      "Genus_plot"
-    )
-  ) %>%
-
-  mutate(
-
-    Relative_abundance =
-      replace_na(
-        Relative_abundance,
-        0
-      )
-  ) %>%
-
-  group_by(Sample) %>%
-
-  mutate(
-
-    sample_total =
-      sum(
-        Relative_abundance,
-        na.rm = TRUE
-      ),
-
-    Relative_abundance =
-      if_else(
-        sample_total > 0,
-        Relative_abundance /
-          sample_total *
-          100,
-        0
-      )
-  ) %>%
-
-  ungroup() %>%
-
-  select(
-    -sample_total
-  )
+genus_plot_data <-
+  genus_result$data
 
 
-# ==============================================================================
-# 20. GENUS SAMPLE COMPLETENESS CHECK
-# ==============================================================================
+genus_colours <- make_taxon_colours(
+  genus_result$categories
+)
+
 
 genus_totals <- genus_plot_data %>%
 
@@ -1022,7 +976,9 @@ genus_totals <- genus_plot_data %>%
   )
 
 
-cat("\nGenus relative abundance totals:\n")
+cat("\n========================================\n")
+cat("GENUS PLOT TOTALS\n")
+cat("========================================\n")
 
 print(
   genus_totals,
@@ -1031,42 +987,7 @@ print(
 
 
 # ==============================================================================
-# 21. GENUS COLOURS
-# ==============================================================================
-
-genus_levels <- unique(
-  genus_plot_data$Genus_plot
-)
-
-
-main_genera <- setdiff(
-  genus_levels,
-  "Other"
-)
-
-
-genus_colours <- setNames(
-
-  hcl.colors(
-    length(main_genera),
-    palette = "Dark 3"
-  ),
-
-  main_genera
-)
-
-
-if ("Other" %in% genus_levels) {
-
-  genus_colours <- c(
-    genus_colours,
-    "Other" = "grey82"
-  )
-}
-
-
-# ==============================================================================
-# 22. GENUS PLOT
+# 18. GENUS PLOT
 # ==============================================================================
 
 p_genus <- ggplot(
@@ -1079,7 +1000,7 @@ p_genus <- ggplot(
 
     y = Relative_abundance,
 
-    fill = Genus_plot
+    fill = Taxon_plot
   )
 
 ) +
@@ -1094,16 +1015,18 @@ p_genus <- ggplot(
 
   scale_y_continuous(
 
-    breaks = seq(
-      0,
-      100,
-      20
-    ),
+    breaks =
+      seq(
+        0,
+        100,
+        20
+      ),
 
-    expand = c(
-      0,
-      0
-    )
+    expand =
+      c(
+        0,
+        0
+      )
   ) +
 
   coord_cartesian(
@@ -1132,30 +1055,36 @@ p_genus <- ggplot(
 
   theme(
 
-    axis.text.x = element_text(
+    axis.text.x =
+      element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        colour = "black"
+      ),
 
-      angle = 45,
+    axis.text.y =
+      element_text(
+        colour = "black"
+      ),
 
-      hjust = 1,
+    axis.title.y =
+      element_text(
+        face = "bold"
+      ),
 
-      vjust = 1,
+    legend.title =
+      element_text(
+        face = "bold"
+      ),
 
-      colour = "black"
-    ),
+    legend.text =
+      element_text(
+        face = "italic"
+      ),
 
-    axis.text.y = element_text(
-      colour = "black"
-    ),
-
-    axis.title.y = element_text(
-      face = "bold"
-    ),
-
-    legend.title = element_text(
-      face = "bold"
-    ),
-
-    legend.position = "right"
+    legend.position =
+      "right"
   )
 
 
@@ -1195,19 +1124,19 @@ ggsave(
 
 
 # ==============================================================================
-# 23. TOP-20 GENUS HEATMAP
-#
-# Unclassified taxa are excluded here because the objective is to
-# display identified genera.
+# 19. TOP-20 GENUS HEATMAP
 # ==============================================================================
 
-heatmap_top <- genus %>%
+genus_identified <- genus %>%
 
   filter(
-    Genus != "Unclassified"
-  ) %>%
+    Taxon != "Unclassified"
+  )
 
-  group_by(Genus) %>%
+
+genus_summary <- genus_identified %>%
+
+  group_by(Taxon) %>%
 
   summarise(
 
@@ -1222,35 +1151,47 @@ heatmap_top <- genus %>%
 
   arrange(
     desc(Mean_abundance)
-  ) %>%
+  )
+
+
+n_heatmap <- min(
+  TOP_HEATMAP_GENERA,
+  nrow(genus_summary)
+)
+
+
+top_heatmap_genera <- genus_summary %>%
 
   slice_head(
-    n = TOP_HEATMAP_GENERA
+    n = n_heatmap
   ) %>%
 
-  pull(Genus)
+  pull(Taxon)
 
 
 heatmap_grid <- expand_grid(
 
-  Sample = factor(
+  Sample =
     sample_order,
-    levels = sample_order
-  ),
 
-  Genus = heatmap_top
+  Genus =
+    top_heatmap_genera
 )
 
 
-heatmap_data <- genus %>%
+heatmap_data <- genus_identified %>%
 
   filter(
-    Genus %in% heatmap_top
+    Taxon %in%
+      top_heatmap_genera
   ) %>%
 
-  select(
+  transmute(
+
     Sample,
-    Genus,
+
+    Genus = Taxon,
+
     Relative_abundance
   )
 
@@ -1281,17 +1222,23 @@ heatmap_data <- heatmap_grid %>%
           0.01
       ),
 
+    Sample = factor(
+      Sample,
+      levels = sample_order
+    ),
+
     Genus = factor(
       Genus,
-      levels = rev(
-        heatmap_top
-      )
+      levels =
+        rev(
+          top_heatmap_genera
+        )
     )
   )
 
 
 # ==============================================================================
-# 24. HEATMAP
+# 20. HEATMAP
 # ==============================================================================
 
 p_heatmap <- ggplot(
@@ -1318,15 +1265,17 @@ p_heatmap <- ggplot(
 
   scale_fill_gradientn(
 
-    colours = viridis(
-      100,
-      option = "C"
-    ),
+    colours =
+      viridis(
+        100,
+        option = "C"
+      ),
 
-    name = expression(
-      log[10] *
-        "(relative abundance + 0.01)"
-    )
+    name =
+      expression(
+        log[10] *
+          "(relative abundance + 0.01)"
+      )
   ) +
 
   scale_x_discrete(
@@ -1334,9 +1283,7 @@ p_heatmap <- ggplot(
   ) +
 
   labs(
-
     x = NULL,
-
     y = NULL
   ) +
 
@@ -1346,25 +1293,24 @@ p_heatmap <- ggplot(
 
   theme(
 
-    axis.text.x = element_text(
+    axis.text.x =
+      element_text(
+        angle = 45,
+        hjust = 1,
+        colour = "black"
+      ),
 
-      angle = 45,
+    axis.text.y =
+      element_text(
+        face = "italic",
+        colour = "black"
+      ),
 
-      hjust = 1,
+    panel.grid =
+      element_blank(),
 
-      colour = "black"
-    ),
-
-    axis.text.y = element_text(
-
-      face = "italic",
-
-      colour = "black"
-    ),
-
-    panel.grid = element_blank(),
-
-    legend.position = "right"
+    legend.position =
+      "right"
   )
 
 
@@ -1404,7 +1350,7 @@ ggsave(
 
 
 # ==============================================================================
-# 25. SAVE COMPOSITION TABLES
+# 21. SAVE ABUNDANCE TABLES
 # ==============================================================================
 
 write.csv(
@@ -1447,25 +1393,15 @@ write.csv(
 
 
 # ==============================================================================
-# 26. PREPARE TRUE GENUS-LEVEL DATA FOR NETWORK
+# 22. PREPARE TRUE GENUS-LEVEL NETWORK DATA
+#
+# IMPORTANT:
+# Only ASVs actually assigned to genus are included.
+#
+# Families such as Pseudomonadaceae will NOT be called genera.
 # ==============================================================================
 
-network_data <- dat
-
-
-if (!NETWORK_INCLUDE_UNCLASSIFIED) {
-
-  network_data <- network_data %>%
-
-    filter(
-      !is.na(Genus)
-    )
-}
-
-
-# Keep genuine genus assignments only
-
-network_genus <- network_data %>%
+network_genus <- dat %>%
 
   filter(
     !is.na(Genus)
@@ -1489,14 +1425,13 @@ network_genus <- network_data %>%
 
 
 # ==============================================================================
-# 27. NETWORK PREVALENCE FILTER
+# 23. PREVALENCE FILTER
 # ==============================================================================
 
-n_samples <- length(
-  unique(
-    network_genus$Sample
+n_samples_total <-
+  length(
+    sample_order
   )
-)
 
 
 prevalence <- network_genus %>%
@@ -1512,7 +1447,7 @@ prevalence <- network_genus %>%
 
     Prevalence =
       Present /
-      n_samples,
+      n_samples_total,
 
     .groups = "drop"
   )
@@ -1528,32 +1463,31 @@ keep_genera <- prevalence %>%
   pull(Genus)
 
 
-network_filtered <- network_genus %>%
-
-  filter(
-    Genus %in% keep_genera
-  )
-
-
 cat("\n========================================\n")
 cat("NETWORK FILTERING\n")
 cat("========================================\n")
 
 cat(
-  "Samples:",
-  n_samples,
+  "Total samples:",
+  n_samples_total,
   "\n"
 )
 
 cat(
-  "Genera retained after prevalence filtering:",
+  "Genera retained:",
   length(
-    unique(
-      network_filtered$Genus
-    )
+    keep_genera
   ),
   "\n"
 )
+
+
+if (length(keep_genera) < 2) {
+
+  stop(
+    "Fewer than two genera remain after prevalence filtering."
+  )
+}
 
 
 write.csv(
@@ -1570,10 +1504,42 @@ write.csv(
 
 
 # ==============================================================================
-# 28. SAMPLE x GENUS COUNT MATRIX
+# 24. BUILD COMPLETE SAMPLE x GENUS MATRIX
 # ==============================================================================
 
-network_matrix_df <- network_filtered %>%
+network_grid <- expand_grid(
+
+  Sample =
+    sample_order,
+
+  Genus =
+    keep_genera
+)
+
+
+network_long <- network_grid %>%
+
+  left_join(
+
+    network_genus,
+
+    by = c(
+      "Sample",
+      "Genus"
+    )
+  ) %>%
+
+  mutate(
+
+    Count =
+      replace_na(
+        Count,
+        0
+      )
+  )
+
+
+network_matrix_df <- network_long %>%
 
   pivot_wider(
 
@@ -1604,7 +1570,7 @@ rownames(
 
 
 # ==============================================================================
-# 29. CLR TRANSFORMATION
+# 25. CLR TRANSFORMATION
 # ==============================================================================
 
 network_pc <-
@@ -1632,12 +1598,13 @@ clr_matrix <- t(
 
 
 # ==============================================================================
-# 30. PAIRWISE SPEARMAN ASSOCIATIONS
+# 26. PAIRWISE SPEARMAN ASSOCIATIONS
 # ==============================================================================
 
-taxa_names <- colnames(
-  clr_matrix
-)
+taxa_names <-
+  colnames(
+    clr_matrix
+  )
 
 
 taxon_pairs <- combn(
@@ -1650,13 +1617,23 @@ taxon_pairs <- combn(
 )
 
 
-safe_spearman <- function(pair) {
+safe_spearman <- function(
+    pair
+) {
 
-  x <- clr_matrix[, pair[1]]
+  x <-
+    clr_matrix[
+      ,
+      pair[1]
+    ]
 
-  y <- clr_matrix[, pair[2]]
 
-  # Avoid constant vectors
+  y <-
+    clr_matrix[
+      ,
+      pair[2]
+    ]
+
 
   if (
     sd(x) == 0 ||
@@ -1667,13 +1644,17 @@ safe_spearman <- function(pair) {
 
       tibble(
 
-        Taxon1 = pair[1],
+        Taxon1 =
+          pair[1],
 
-        Taxon2 = pair[2],
+        Taxon2 =
+          pair[2],
 
-        rho = NA_real_,
+        rho =
+          NA_real_,
 
-        p = NA_real_
+        p =
+          NA_real_
       )
     )
   }
@@ -1687,18 +1668,22 @@ safe_spearman <- function(pair) {
 
       y,
 
-      method = "spearman",
+      method =
+        "spearman",
 
-      exact = FALSE
+      exact =
+        FALSE
     )
   )
 
 
   tibble(
 
-    Taxon1 = pair[1],
+    Taxon1 =
+      pair[1],
 
-    Taxon2 = pair[2],
+    Taxon2 =
+      pair[2],
 
     rho =
       unname(
@@ -1720,7 +1705,7 @@ edge_tests <- map_dfr(
 
 
 # ==============================================================================
-# 31. MULTIPLE-TEST CORRECTION
+# 27. MULTIPLE-TESTING CORRECTION
 # ==============================================================================
 
 edge_tests <- edge_tests %>%
@@ -1736,7 +1721,7 @@ edge_tests <- edge_tests %>%
 
 
 # ==============================================================================
-# 32. RETAIN NETWORK EDGES
+# 28. RETAIN SIGNIFICANT NETWORK EDGES
 # ==============================================================================
 
 network_edges <- edge_tests %>%
@@ -1769,7 +1754,7 @@ network_edges <- edge_tests %>%
 
 
 cat(
-  "Edges retained:",
+  "Significant edges retained:",
   nrow(
     network_edges
   ),
@@ -1803,27 +1788,19 @@ write.csv(
 )
 
 
-# ==============================================================================
-# 33. STOP IF NO EDGES SURVIVE
-# ==============================================================================
-
-if (
-  nrow(
-    network_edges
-  ) == 0
-) {
+if (nrow(network_edges) == 0) {
 
   stop(
-    paste0(
-      "No associations passed the selected thresholds.\n",
-      "Consider inspecting the data or adjusting thresholds."
+    paste(
+      "No network edges passed the thresholds.",
+      "Inspect the data or adjust the network thresholds."
     )
   )
 }
 
 
 # ==============================================================================
-# 34. BUILD IGRAPH NETWORK
+# 29. BUILD IGRAPH NETWORK
 # ==============================================================================
 
 g <- graph_from_data_frame(
@@ -1851,7 +1828,7 @@ cat(
 )
 
 cat(
-  "Network density:",
+  "Density:",
   edge_density(
     g,
     loops = FALSE
@@ -1869,7 +1846,7 @@ cat(
 
 
 # ==============================================================================
-# 35. COMMUNITY / MODULE DETECTION
+# 30. COMMUNITY DETECTION
 # ==============================================================================
 
 communities <- cluster_louvain(
@@ -1894,7 +1871,7 @@ network_modularity <-
 
 
 cat(
-  "Number of modules:",
+  "Modules:",
   length(
     communities
   ),
@@ -1909,7 +1886,7 @@ cat(
 
 
 # ==============================================================================
-# 36. NODE CENTRALITY
+# 31. NODE CENTRALITY
 # ==============================================================================
 
 node_stats <- tibble(
@@ -1922,31 +1899,22 @@ node_stats <- tibble(
 
   Betweenness =
     betweenness(
-
       g,
-
       directed = FALSE,
-
       normalized = TRUE
     ),
 
   Eigenvector =
     eigen_centrality(
-
       g,
-
       directed = FALSE,
-
       weights =
         E(g)$Weight
     )$vector,
 
   Module =
     V(g)$Module
-)
-
-
-node_stats <- node_stats %>%
+) %>%
 
   arrange(
 
@@ -1981,7 +1949,7 @@ write.csv(
 
 
 # ==============================================================================
-# 37. NETWORK SUMMARY TABLE
+# 32. NETWORK SUMMARY CSV
 # ==============================================================================
 
 network_summary <- tibble(
@@ -1990,7 +1958,7 @@ network_summary <- tibble(
 
     "Samples",
 
-    "Taxa after prevalence filtering",
+    "Genera after prevalence filtering",
 
     "Network nodes",
 
@@ -2007,7 +1975,7 @@ network_summary <- tibble(
 
   Value = c(
 
-    n_samples,
+    n_samples_total,
 
     length(
       keep_genera
@@ -2049,7 +2017,7 @@ write.csv(
 
 
 # ==============================================================================
-# 38. NETWORK APPEARANCE
+# 33. NETWORK APPEARANCE
 # ==============================================================================
 
 V(g)$size <-
@@ -2067,51 +2035,50 @@ V(g)$size <-
   )
 
 
-modules <- sort(
+module_ids <- sort(
   unique(
     V(g)$Module
   )
 )
 
 
-module_colours <- hcl.colors(
+module_colours <- setNames(
 
-  length(modules),
+  hcl.colors(
+    length(module_ids),
+    palette = "Dark 3"
+  ),
 
-  palette = "Dark 3"
+  module_ids
 )
 
 
 V(g)$color <-
 
-  module_colours[
-    match(
-      V(g)$Module,
-      modules
-    )
-  ]
+  unname(
+    module_colours[
+      as.character(
+        V(g)$Module
+      )
+    ]
+  )
 
 
 V(g)$frame.color <- NA
 
 
-E(g)$width <-
+E(g)$width <- scales::rescale(
 
-  scales::rescale(
+  abs(
+    E(g)$rho
+  ),
 
-    abs(
-      E(g)$rho
-    ),
-
-    to = c(
-      0.5,
-      3
-    )
+  to = c(
+    0.5,
+    3
   )
+)
 
-
-# Positive = blue
-# Negative = red
 
 E(g)$color <- ifelse(
 
@@ -2134,7 +2101,7 @@ E(g)$lty <- ifelse(
 
 
 # ==============================================================================
-# 39. NETWORK LAYOUT
+# 34. NETWORK LAYOUT
 # ==============================================================================
 
 set.seed(123)
@@ -2149,102 +2116,31 @@ network_layout <- layout_with_fr(
 )
 
 
-# ==============================================================================
-# 40. FULL NETWORK — PNG
-# ==============================================================================
-
-png(
-
-  file.path(
-    OUTPUT_DIR,
-    "cooccurrence_network_full.png"
+cat(
+  "\nNetwork layout dimensions:",
+  paste(
+    dim(network_layout),
+    collapse = " x "
   ),
-
-  width = 4500,
-
-  height = 3800,
-
-  res = 400
+  "\n"
 )
 
 
-plot(
+# ==============================================================================
+# 35. DETERMINE NUMBER OF HUB TAXA TO LABEL
+#
+# FIXED: no n() inside slice_max()
+# ==============================================================================
 
-  g,
+top_n_nodes <- min(
 
-  layout =
-    network_layout,
+  20L,
 
-  vertex.label =
-    V(g)$name,
-
-  vertex.label.cex =
-    0.52,
-
-  vertex.label.color =
-    "black",
-
-  vertex.size =
-    V(g)$size,
-
-  vertex.color =
-    V(g)$color,
-
-  vertex.frame.color =
-    NA,
-
-  edge.color =
-    E(g)$color,
-
-  edge.width =
-    E(g)$width,
-
-  edge.lty =
-    E(g)$lty,
-
-  edge.curved =
-    0.08,
-
-  main =
-    "Genus-level bacterial co-occurrence network"
+  nrow(
+    node_stats
+  )
 )
 
-
-legend(
-
-  "topleft",
-
-  legend = c(
-
-    "Positive association",
-
-    "Negative association"
-  ),
-
-  col = c(
-
-    "#2C7FB8",
-
-    "#D95F5F"
-  ),
-
-  lty = c(
-    1,
-    2
-  ),
-
-  lwd = 2,
-
-  bty = "n"
-)
-
-
-dev.off()
-
-
-# ==============================================================================
-# 41. CLEAN NETWORK — LABEL ONLY MOST CONNECTED GENERA
-# ==============================================================================
 
 top_label_taxa <- node_stats %>%
 
@@ -2252,32 +2148,140 @@ top_label_taxa <- node_stats %>%
 
     order_by = Degree,
 
-    n = min(
-      20,
-      n()
-    )
+    n = top_n_nodes,
+
+    with_ties = FALSE
   ) %>%
 
   pull(Genus)
 
 
-V(g)$label_clean <- ifelse(
+V(g)$label_hubs <- ifelse(
 
   V(g)$name %in%
     top_label_taxa,
 
   V(g)$name,
 
-  NA
+  NA_character_
 )
 
 
+# ==============================================================================
+# 36. FUNCTION TO DRAW NETWORK
+#
+# This avoids repeating long plot() code and prevents syntax errors.
+# ==============================================================================
+
+draw_network <- function(
+    labels,
+    title_text
+) {
+
+  plot(
+
+    g,
+
+    layout =
+      network_layout,
+
+    vertex.label =
+      labels,
+
+    vertex.label.cex =
+      0.65,
+
+    vertex.label.color =
+      "black",
+
+    vertex.size =
+      V(g)$size,
+
+    vertex.color =
+      V(g)$color,
+
+    vertex.frame.color =
+      NA,
+
+    edge.color =
+      E(g)$color,
+
+    edge.width =
+      E(g)$width,
+
+    edge.lty =
+      E(g)$lty,
+
+    edge.curved =
+      0.08,
+
+    main =
+      title_text
+  )
+
+
+  legend(
+
+    "topleft",
+
+    legend = c(
+
+      "Positive association",
+
+      "Negative association"
+    ),
+
+    col = c(
+
+      "#2C7FB8",
+
+      "#D95F5F"
+    ),
+
+    lty = c(
+      1,
+      2
+    ),
+
+    lwd = 2,
+
+    bty = "n"
+  )
+
+
+  legend(
+
+    "topright",
+
+    legend =
+      paste(
+        "Module",
+        module_ids
+      ),
+
+    pch = 21,
+
+    pt.bg =
+      module_colours,
+
+    pt.cex = 1.4,
+
+    bty = "n"
+  )
+}
+
+
+# ==============================================================================
+# 37. SAVE FULL NETWORK PNG
+# ==============================================================================
+
 png(
 
-  file.path(
-    OUTPUT_DIR,
-    "cooccurrence_network_hubs_labelled.png"
-  ),
+  filename =
+    file.path(
+      OUTPUT_DIR,
+      "cooccurrence_network_full.png"
+    ),
 
   width = 4500,
 
@@ -2287,74 +2291,13 @@ png(
 )
 
 
-plot(
+draw_network(
 
-  g,
+  labels =
+    V(g)$name,
 
-  layout =
-    network_layout,
-
-  vertex.label =
-    V(g)$label_clean,
-
-  vertex.label.cex =
-    0.72,
-
-  vertex.label.color =
-    "black",
-
-  vertex.size =
-    V(g)$size,
-
-  vertex.color =
-    V(g)$color,
-
-  vertex.frame.color =
-    NA,
-
-  edge.color =
-    E(g)$color,
-
-  edge.width =
-    E(g)$width,
-
-  edge.lty =
-    E(g)$lty,
-
-  edge.curved =
-    0.08,
-
-  main =
-    "Bacterial co-occurrence network: highly connected taxa labelled"
-)
-
-
-legend(
-
-  "topleft",
-
-  legend = c(
-
-    "Positive association",
-
-    "Negative association"
-  ),
-
-  col = c(
-
-    "#2C7FB8",
-
-    "#D95F5F"
-  ),
-
-  lty = c(
-    1,
-    2
-  ),
-
-  lwd = 2,
-
-  bty = "n"
+  title_text =
+    "Genus-level bacterial co-occurrence network"
 )
 
 
@@ -2362,15 +2305,49 @@ dev.off()
 
 
 # ==============================================================================
-# 42. VECTOR PDF NETWORK
+# 38. SAVE HUB-LABELLED NETWORK PNG
+# ==============================================================================
+
+png(
+
+  filename =
+    file.path(
+      OUTPUT_DIR,
+      "cooccurrence_network_hubs_labelled.png"
+    ),
+
+  width = 4500,
+
+  height = 3800,
+
+  res = 400
+)
+
+
+draw_network(
+
+  labels =
+    V(g)$label_hubs,
+
+  title_text =
+    "Bacterial co-occurrence network: highly connected genera"
+)
+
+
+dev.off()
+
+
+# ==============================================================================
+# 39. SAVE HUB-LABELLED NETWORK PDF
 # ==============================================================================
 
 pdf(
 
-  file.path(
-    OUTPUT_DIR,
-    "cooccurrence_network_hubs_labelled.pdf"
-  ),
+  file =
+    file.path(
+      OUTPUT_DIR,
+      "cooccurrence_network_hubs_labelled.pdf"
+    ),
 
   width = 14,
 
@@ -2378,42 +2355,13 @@ pdf(
 )
 
 
-plot(
+draw_network(
 
-  g,
+  labels =
+    V(g)$label_hubs,
 
-  layout =
-    network_layout,
-
-  vertex.label =
-    V(g)$label_clean,
-
-  vertex.label.cex =
-    0.65,
-
-  vertex.label.color =
-    "black",
-
-  vertex.size =
-    V(g)$size,
-
-  vertex.color =
-    V(g)$color,
-
-  vertex.frame.color =
-    NA,
-
-  edge.color =
-    E(g)$color,
-
-  edge.width =
-    E(g)$width,
-
-  edge.lty =
-    E(g)$lty,
-
-  edge.curved =
-    0.08
+  title_text =
+    "Bacterial co-occurrence network: highly connected genera"
 )
 
 
@@ -2421,19 +2369,18 @@ dev.off()
 
 
 # ==============================================================================
-# 43. HUB-TAXA DEGREE PLOT
+# 40. TOP HUB-TAXA BAR PLOT
 # ==============================================================================
 
-top20_nodes <- node_stats %>%
+top_nodes <- node_stats %>%
 
   slice_max(
 
     order_by = Degree,
 
-    n = min(
-      20,
-      n()
-    )
+    n = top_n_nodes,
+
+    with_ties = FALSE
   ) %>%
 
   arrange(Degree) %>%
@@ -2453,7 +2400,7 @@ top20_nodes <- node_stats %>%
 
 p_degree <- ggplot(
 
-  top20_nodes,
+  top_nodes,
 
   aes(
 
@@ -2478,7 +2425,8 @@ p_degree <- ggplot(
 
     fill = "Module",
 
-    title = "Most connected genera in the co-occurrence network"
+    title =
+      "Most connected genera in the co-occurrence network"
   ) +
 
   theme_classic(
@@ -2496,6 +2444,16 @@ p_degree <- ggplot(
     axis.text.x =
       element_text(
         colour = "black"
+      ),
+
+    axis.title.x =
+      element_text(
+        face = "bold"
+      ),
+
+    legend.title =
+      element_text(
+        face = "bold"
       ),
 
     legend.position =
@@ -2539,9 +2497,9 @@ ggsave(
 
 
 # ==============================================================================
-# 44. EXPORT NETWORK TO GRAPHML
+# 41. EXPORT NETWORK TO GRAPHML
 #
-# Useful for Cytoscape or Gephi.
+# Can be opened in Cytoscape or Gephi.
 # ==============================================================================
 
 write_graph(
@@ -2558,7 +2516,7 @@ write_graph(
 
 
 # ==============================================================================
-# 45. FINAL SAMPLE CHECK
+# 42. FINAL SAMPLE REPRESENTATION CHECK
 # ==============================================================================
 
 sample_check <- tibble(
@@ -2592,12 +2550,18 @@ sample_check <- tibble(
         unique(
           heatmap_data$Sample
         )
+      ),
+
+  In_network_input =
+    sample_order %in%
+      unique(
+        network_long$Sample
       )
 )
 
 
 cat("\n========================================\n")
-cat("FINAL SAMPLE REPRESENTATION CHECK\n")
+cat("FINAL SAMPLE CHECK\n")
 cat("========================================\n")
 
 print(
@@ -2620,7 +2584,35 @@ write.csv(
 
 
 # ==============================================================================
-# 46. FINISHED
+# 43. CHECK FOR ANY FAILED SAMPLE REPRESENTATION
+# ==============================================================================
+
+if (
+  any(
+    !sample_check$In_phylum_plot
+  ) ||
+    any(
+      !sample_check$In_genus_plot
+    ) ||
+    any(
+      !sample_check$In_heatmap
+    )
+) {
+
+  warning(
+    "At least one sample is missing from one or more plots. Check sample_representation_check.csv."
+  )
+
+} else {
+
+  cat(
+    "\nAll samples are represented in the composition plots and heatmap.\n"
+  )
+}
+
+
+# ==============================================================================
+# 44. FINISHED
 # ==============================================================================
 
 cat("\n========================================\n")
@@ -2628,61 +2620,55 @@ cat("ANALYSIS COMPLETE\n")
 cat("========================================\n")
 
 cat(
-  "\nResults saved to:\n",
+  "\nAll outputs saved in:\n",
   OUTPUT_DIR,
-  "\n"
+  "\n\n"
 )
 
 cat(
-  "\nPhylum plot:\n",
-  file.path(
-    OUTPUT_DIR,
-    "SILVA144_phylum_relative_abundance.png"
-  ),
-  "\n"
+  "Main figures:\n"
 )
 
 cat(
-  "\nGenus plot:\n",
-  file.path(
-    OUTPUT_DIR,
-    "SILVA144_genus_relative_abundance.png"
-  ),
-  "\n"
+  "1. SILVA144_phylum_relative_abundance.png\n"
 )
 
 cat(
-  "\nHeatmap:\n",
-  file.path(
-    OUTPUT_DIR,
-    "SILVA144_top20_genus_heatmap.png"
-  ),
-  "\n"
+  "2. SILVA144_genus_relative_abundance.png\n"
 )
 
 cat(
-  "\nNetwork:\n",
-  file.path(
-    OUTPUT_DIR,
-    "cooccurrence_network_hubs_labelled.png"
-  ),
-  "\n"
+  "3. SILVA144_top20_genus_heatmap.png\n"
 )
 
 cat(
-  "\nNetwork node statistics:\n",
-  file.path(
-    OUTPUT_DIR,
-    "network_node_centrality.csv"
-  ),
-  "\n"
+  "4. cooccurrence_network_full.png\n"
 )
 
 cat(
-  "\nNetwork edges:\n",
-  file.path(
-    OUTPUT_DIR,
-    "significant_network_edges.csv"
-  ),
-  "\n"
+  "5. cooccurrence_network_hubs_labelled.png\n"
+)
+
+cat(
+  "6. top20_network_taxa_degree.png\n\n"
+)
+
+cat(
+  "Network files:\n"
+)
+
+cat(
+  "7. network_node_centrality.csv\n"
+)
+
+cat(
+  "8. significant_network_edges.csv\n"
+)
+
+cat(
+  "9. network_summary.csv\n"
+)
+
+cat(
+  "10. cooccurrence_network.graphml\n"
 )
